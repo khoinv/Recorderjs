@@ -44,7 +44,8 @@ var Recorder = exports.Recorder = (function () {
         this.config = {
             bufferLen: 4096,
             numChannels: 2,
-            mimeType: 'audio/wav'
+            mimeType: 'audio/wav',
+            outputSampleRate: undefined
         };
         this.recording = false;
         this.callbacks = {
@@ -77,7 +78,8 @@ var Recorder = exports.Recorder = (function () {
             var recLength = 0,
                 recBuffers = [],
                 sampleRate = undefined,
-                numChannels = undefined;
+                numChannels = undefined,
+                outputSampleRate = undefined;
 
             self.onmessage = function (e) {
                 switch (e.data.command) {
@@ -102,6 +104,7 @@ var Recorder = exports.Recorder = (function () {
             function init(config) {
                 sampleRate = config.sampleRate;
                 numChannels = config.numChannels;
+                outputSampleRate = config.outputSampleRate;
                 initBuffers();
             }
 
@@ -115,19 +118,48 @@ var Recorder = exports.Recorder = (function () {
             function exportWAV(type) {
                 var buffers = [];
                 for (var channel = 0; channel < numChannels; channel++) {
-                    buffers.push(mergeBuffers(recBuffers[channel], recLength));
+                    var _buffer = mergeBuffers(recBuffers[channel], recLength);
+                        buffers.push(outputSampleRate ? downsampleBuffer(_buffer, outputSampleRate): _buffer);
                 }
+
                 var interleaved = undefined;
                 if (numChannels === 2) {
                     interleaved = interleave(buffers[0], buffers[1]);
                 } else {
                     interleaved = buffers[0];
                 }
-                var dataview = encodeWAV(interleaved);
+                var dataview = encodeWAV(interleaved, outputSampleRate? outputSampleRate: sampleRate);
                 var audioBlob = new Blob([dataview], { type: type });
 
                 self.postMessage({ command: 'exportWAV', data: audioBlob });
             }
+
+            function downsampleBuffer(buffer, rate) {
+                if (rate == sampleRate) {
+                    return buffer;
+                }
+                if (rate > sampleRate) {
+                    throw "downsampling rate show be smaller than original sample rate";
+                }
+                var sampleRateRatio = sampleRate / rate;
+                var newLength = Math.round(buffer.length / sampleRateRatio);
+                var result = new Float32Array(newLength);
+                var offsetResult = 0;
+                var offsetBuffer = 0;
+                while (offsetResult < newLength) {
+                    var nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+                    var accum = 0, count = 0;
+                    for (var i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                        accum += buffer[i];
+                        count++;
+                    }
+                    result[offsetResult] = accum / count;
+                    offsetResult++;
+                    offsetBuffer = nextOffsetBuffer;
+                }
+                return result;
+            }
+
 
             function getBuffer() {
                 var buffers = [];
@@ -187,7 +219,7 @@ var Recorder = exports.Recorder = (function () {
                 }
             }
 
-            function encodeWAV(samples) {
+            function encodeWAV(samples, outSampleRate) {
                 var buffer = new ArrayBuffer(44 + samples.length * 2);
                 var view = new DataView(buffer);
 
@@ -206,9 +238,9 @@ var Recorder = exports.Recorder = (function () {
                 /* channel count */
                 view.setUint16(22, numChannels, true);
                 /* sample rate */
-                view.setUint32(24, sampleRate, true);
+                view.setUint32(24, outSampleRate, true);
                 /* byte rate (sample rate * block align) */
-                view.setUint32(28, sampleRate * 4, true);
+                view.setUint32(28, outSampleRate * 4, true);
                 /* block align (channel count * bytes per sample) */
                 view.setUint16(32, numChannels * 2, true);
                 /* bits per sample */
@@ -228,7 +260,8 @@ var Recorder = exports.Recorder = (function () {
             command: 'init',
             config: {
                 sampleRate: this.context.sampleRate,
-                numChannels: this.config.numChannels
+                numChannels: this.config.numChannels,
+                outputSampleRate: this.config.outputSampleRate
             }
         });
 
